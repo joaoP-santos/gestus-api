@@ -8,10 +8,14 @@ import traceback
 from werkzeug.utils import secure_filename
 import torch.nn.functional as F
 import json
+from flask_cors import CORS
+
+
 
 from utils import process_video, initialize_model
 
 app = Flask(__name__)
+CORS(app)
 
 # Initialize model and landmark extractor globally
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
