@@ -18,7 +18,8 @@ import config
 from utils import initialize_model, process_video, MediaPipeLandmarkExtractor
 
 app = Flask(__name__)
-CORS(app)
+
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Initialize Supabase client
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
@@ -283,6 +284,7 @@ def contribute_endpoint():
                 os.unlink(tmp_path)
             except Exception:
                 pass
+
 if __name__ == "__main__":
     # Configuration from config.py
     port = config.PORT
