@@ -1,0 +1,8 @@
+flask
+flask-cors
+torch
+torchvision
+numpy
+opencv-python-headless
+mediapipe
+gunicorn

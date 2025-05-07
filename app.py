@@ -1,97 +1,72 @@
-from flask import Flask, render_template, request, jsonify
-import cv2
-import numpy as np
-import torch
-import tempfile
 import os
+import tempfile
 import traceback
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 from werkzeug.utils import secure_filename
-import torch.nn.functional as F
-import json
 
-from utils import process_video, initialize_model
+import torch
+
+from utils import initialize_model, process_video
 
 app = Flask(__name__)
+CORS(app)
 
-# Initialize model and landmark extractor globally
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model_path = 'best_model.pth'
+# Load model at startup
+# MODEL_PATH can be overridden via environment variables
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model_path = os.environ.get("MODEL_PATH", "best_model.pth")
+model, landmark_extractor = initialize_model(None, model_path, None)
 
-# Initialize these as None first, then load in a function to handle errors better
-model = None
-idx_to_class = None
-landmark_extractor = None
+@app.route("/", methods=["GET"])
+def health_check():
+    """Health check endpoint."""
+    return jsonify({"status": "ok"}), 200
 
-@app.route('/')
-def index():
-    return render_template('index.html')
+@app.route("/process", methods=["POST"])
+def process_endpoint():
+    """Accepts a video file, runs inference, and returns predictions."""
+    if "video" not in request.files:
+        return jsonify({"status": "error", "error": "No video file provided"}), 400
 
-@app.route('/process', methods=['POST'])
-def process():
-    if 'video' not in request.files:
-        return jsonify({'error': 'No video file provided'}), 400
-    
-    video_file = request.files['video']
-    
-    # Save uploaded video to temporary file
     tmp_path = None
+    video_file = request.files["video"]
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as tmp:
+        # Secure filename and determine suffix
+        filename = secure_filename(video_file.filename)
+        suffix = os.path.splitext(filename)[1] or ".webm"
+
+        # Save to temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp_path = tmp.name
             video_file.save(tmp_path)
-        
-        # Add debug info
-        print(f"Video saved to temporary file: {tmp_path}")
-        print(f"Model loaded: {model is not None}")
-        print(f"Class mapping size: {len(idx_to_class) if idx_to_class else 0}")
-        
-        # Process the video and get predictions
-        print("\n--- Starting new video processing ---")
+
+        # Run processing
         predictions = process_video(tmp_path, model, landmark_extractor)
-        
-        # Clean up temporary file
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-            
-        return jsonify({
-            'status': 'success',
-            'predictions': predictions
-        })
-        
+
+        # Return results
+        return jsonify({"status": "success", "predictions": predictions}), 200
+
     except ValueError as ve:
-        # Specific error for validation issues
-        print(f"Validation error: {ve}")
-        
-        # Clean up on error
-        if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-            
-        # Return user-friendly error message
-        return jsonify({
-            'status': 'error',
-            'error': str(ve),
-            'message': 'Please try recording again with clearer gestures and make sure your hands are visible.'
-        }), 400  # 400 Bad Request
-        
+        # Validation-related error (e.g., hands not detected)
+        return jsonify({"status": "error", "error": str(ve), "message": "Validation failed"}), 400
+
     except Exception as e:
-        # Print full traceback for debugging
-        print(f"Unexpected error processing video: {e}")
+        # Unexpected errors
         traceback.print_exc()
-        
-        # Clean up on error
+        return jsonify({"status": "error", "error": str(e), "message": "Server error occurred"}), 500
+
+    finally:
+        # Clean up temp file if it exists
         if tmp_path and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-            
-        # Return detailed error message
-        error_message = str(e)
-        return jsonify({
-            'status': 'error',
-            'error': error_message,
-            'message': 'A server error occurred while processing your video. Our team has been notified of the issue.'
-        }), 500
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
-# Initialize model at startup
-model, landmark_extractor = initialize_model(model, model_path, landmark_extractor)
-
-if __name__ == '__main__':
-    app.run(debug=True)
+if __name__ == "__main__":
+    # Bind to PORT ((env var provided by Render), default 5000
+    port = int(os.environ.get("PORT", 5000))
+    # Enable debug only in development
+    debug = os.environ.get("FLASK_ENV") == "development"
+    app.run(host="0.0.0.0", port=port, debug=debug)

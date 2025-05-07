@@ -465,7 +465,7 @@ def initialize_model(model, model_path, landmark_extractor):
                         
                 if not os.path.exists(model_path):
                     print("Could not find model file in any location.")
-                    return False
+                    raise FileNotFoundError(f"Model file not found at {model_path}. Make sure the model file is included or set MODEL_PATH appropriately.")
             
             # Direct loading from checkpoint
             checkpoint = torch.load(model_path, map_location=device)
@@ -535,7 +535,7 @@ def initialize_model(model, model_path, landmark_extractor):
                 print("Model state_dict loaded successfully")
             except Exception as e:
                 print(f"Error loading state_dict: {e}")
-                return False
+                raise RuntimeError(f"Error loading state_dict: {e}")
                 
             model.to(device)
             model.eval()
@@ -568,12 +568,12 @@ def initialize_model(model, model_path, landmark_extractor):
             except Exception as e:
                 print(f"Error during test prediction: {e}")
                 traceback.print_exc()
-                return False
+                raise RuntimeError(f"Error during test prediction: {e}")
                 
         except Exception as e:
             print(f"Error loading model: {e}")
             traceback.print_exc()
-            return False
+            raise RuntimeError(f"Error loading model: {e}")
             
     if landmark_extractor is None:
         try:
@@ -582,6 +582,6 @@ def initialize_model(model, model_path, landmark_extractor):
         except Exception as e:
             print(f"Error initializing landmark extractor: {e}")
             traceback.print_exc()
-            return False
+            raise RuntimeError(f"Error initializing landmark extractor: {e}")
         
     return model, landmark_extractor
