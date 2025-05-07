@@ -3,5 +3,6 @@ flask-cors
 torch
 torchvision
 numpy
-opencv-python
+opencv-python-headless
+mediapipe
 gunicorn

@@ -98,4 +98,8 @@ def process():
 model, landmark_extractor = initialize_model(model, model_path, landmark_extractor)
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Use the PORT environment variable for deploy platforms like Render
+    port = int(os.environ.get('PORT', 5000))
+    # Enable debug only in development
+    debug = os.environ.get('FLASK_ENV') == 'development'
+    app.run(host='0.0.0.0', port=port, debug=debug)
