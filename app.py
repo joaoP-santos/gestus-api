@@ -10,12 +10,16 @@ from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import torch
+import torch.nn.functional as F
 from supabase import create_client, Client
 
 # Import configuration from config.py
 import config
 
-from utils import initialize_model, process_video, MediaPipeLandmarkExtractor
+# Import utilities for landmark processing and model handling
+from utils import initialize_model, process_raw_landmarks, MediaPipeLandmarkExtractor
+# Import the utils module to access the global idx_to_class variable
+import utils
 
 app = Flask(__name__)
 
@@ -42,44 +46,76 @@ def health_check():
 
 @app.route("/process", methods=["POST"])
 def process_endpoint():
-    """Accepts a video file, runs inference, and returns predictions."""
-    if "video" not in request.files:
-        return jsonify({"status": "error", "error": "No video file provided"}), 400
-
-    tmp_path = None
-    video_file = request.files["video"]
+    """Accepts pre-processed landmarks from the frontend, runs inference, and returns predictions."""
     try:
-        # Secure filename and determine suffix
-        filename = secure_filename(video_file.filename)
-        suffix = os.path.splitext(filename)[1] or ".webm"
-
-        # Save to temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp_path = tmp.name
-            video_file.save(tmp_path)
-
-        # Run processing
-        predictions = process_video(tmp_path, model, landmark_extractor)
-
-        # Return results
-        return jsonify({"status": "success", "predictions": predictions}), 200
+        # Get JSON data from the request
+        request_data = request.get_json()
+        
+        if not request_data or 'landmarks' not in request_data:
+            return jsonify({"status": "error", "error": "No landmarks provided"}), 400
+            
+        # Extract landmarks sequence from the request
+        landmarks_sequence = np.array(request_data['landmarks'])
+        
+        # Validate landmark data
+        if landmarks_sequence.size == 0:
+            return jsonify({"status": "error", "error": "Empty landmarks array provided"}), 400
+        
+        # Process the landmarks and get model predictions
+        try:
+            # Process landmarks to normalize sequence length
+            processed_landmarks = process_raw_landmarks(
+                landmarks_sequence,
+                target_length=150,
+                downsample_factor=2
+            )
+            
+            # Get predictions from model
+            with torch.no_grad():
+                input_tensor = torch.tensor(processed_landmarks, dtype=torch.float32).unsqueeze(0).to(device)
+                
+                output = model(input_tensor)
+                
+                # Apply softmax to get probabilities
+                probabilities = F.softmax(output, dim=1)[0]
+                
+                # Get top predictions
+                k = min(3, len(probabilities))
+                topk_probs, topk_indices = torch.topk(probabilities, k)
+                
+                # Format predictions for output
+                predictions = []
+                for idx, prob in zip(topk_indices, topk_probs):
+                    idx_val = idx.item()
+                    
+                    # Try multiple formats of the index to find the class
+                    if idx_val in utils.idx_to_class:
+                        sign = utils.idx_to_class[idx_val]
+                    elif str(idx_val) in utils.idx_to_class:
+                        sign = utils.idx_to_class[str(idx_val)]
+                    else:
+                        # If not found, use a placeholder
+                        sign = f"Class_{idx_val}"
+                    
+                    predictions.append({
+                        "sign": sign,
+                        "confidence": float(prob.item())
+                    })
+                
+                return jsonify({"status": "success", "predictions": predictions}), 200
+                
+        except Exception as e:
+            traceback.print_exc()
+            return jsonify({"status": "error", "error": str(e), "message": "Error processing landmarks"}), 500
 
     except ValueError as ve:
-        # Validation-related error (e.g., hands not detected)
+        # Validation-related error
         return jsonify({"status": "error", "error": str(ve), "message": "Validation failed"}), 400
 
     except Exception as e:
         # Unexpected errors
         traceback.print_exc()
         return jsonify({"status": "error", "error": str(e), "message": "Server error occurred"}), 500
-
-    finally:
-        # Clean up temp file if it exists
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
 
 @app.route("/get-random-sign", methods=["GET"])
 def get_random_sign():
@@ -147,85 +183,38 @@ def get_dataset_stats():
 
 @app.route("/contribute", methods=["POST"])
 def contribute_endpoint():
-    """Process a video for dataset contribution."""
-    if "video" not in request.files:
-        return jsonify({"status": "error", "error": "No video file provided"}), 400
-    
-    if "sign" not in request.form:
-        return jsonify({"status": "error", "error": "No sign label provided"}), 400
-    
-    sign_name = request.form["sign"]
-    if sign_name not in app.config['SIGNS']:
-        return jsonify({"status": "error", "error": "Invalid sign name"}), 400
-        
-    tmp_path = None
-    video_file = request.files["video"]
+    """Accept pre-processed landmarks for dataset contribution."""
     try:
-        # Secure filename and determine suffix
-        filename = secure_filename(video_file.filename)
-        suffix = os.path.splitext(filename)[1] or ".webm"
-
-        # Save to temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp_path = tmp.name
-            video_file.save(tmp_path)
+        # Get JSON data from the request
+        request_data = request.get_json()
+        
+        if not request_data:
+            return jsonify({"status": "error", "error": "No data provided"}), 400
             
-        # Extract landmarks using our existing extractor
-        landmarks_extractor = MediaPipeLandmarkExtractor()
-        landmarks_sequence = []
+        # Validate required fields
+        if 'sign' not in request_data:
+            return jsonify({"status": "error", "error": "No sign label provided"}), 400
+            
+        if 'landmarks' not in request_data:
+            return jsonify({"status": "error", "error": "No landmarks provided"}), 400
         
-        # Open video file
-        import cv2
-        cap = cv2.VideoCapture(tmp_path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open the video file: {tmp_path}")
+        # Extract data
+        sign_name = request_data['sign']
+        landmarks_sequence = request_data['landmarks']
         
-        # Get video properties
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        # Handle invalid frame count (common in WebM files)
-        if frame_count <= 0 or frame_count > 100000:
-            frame_count = 300  # Default to processing up to 300 frames
-        
-        # Set frame dimensions for landmark extractor
-        landmarks_extractor.set_frame_size(width, height)
-        
-        # Collect landmarks from each frame
-        processed_frames = 0
-        max_frames = min(300, frame_count)
-        
-        while processed_frames < max_frames:
-            ret, frame = cap.read()
-            if not ret:
-                break
-                
-            try:
-                landmarks, _ = landmarks_extractor.extract_landmarks(frame)
-                
-                # Only add landmarks if they contain actual data (not empty or all zeros)
-                if landmarks is not None and np.any(landmarks):
-                    landmarks_sequence.append(landmarks.tolist())  # Convert numpy arrays to lists for JSON
-                    
-                processed_frames += 1
-                
-            except Exception as e:
-                # Continue with next frame instead of failing completely
-                continue
-        
-        cap.release()
-        
-        # Make sure we actually have landmarks before proceeding
-        if not landmarks_sequence:
-            raise ValueError("No landmarks could be extracted from the video. Please ensure your hands are clearly visible.")
+        # Validate sign name
+        if sign_name not in app.config['SIGNS']:
+            return jsonify({"status": "error", "error": "Invalid sign name"}), 400
+            
+        # Validate landmarks data
+        if not landmarks_sequence or len(landmarks_sequence) == 0:
+            return jsonify({"status": "error", "error": "Empty landmarks array provided"}), 400
 
         # Create a timestamp and unique ID for the file name
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
         unique_id = str(uuid.uuid4())[:8]  # First 8 chars of UUID
         
-        # Create metadata
+        # Create metadata - only include sign and landmarks fields
         metadata = {
             "sign": sign_name,
             "landmarks": landmarks_sequence
@@ -247,9 +236,9 @@ def contribute_endpoint():
                 file_content = f.read()
             
             # Use the sign name as the folder name
-            storage_path = f"landmarks/{sign_name}/{filename}"
+            storage_path = f"{sign_name}/{filename}"
                 
-            # Upload the file to Supabase - use the simplified API that doesn't need bucket check
+            # Upload the file to Supabase
             try:
                 result = supabase.storage.from_(bucket_name).upload(
                     path=storage_path, 
@@ -265,11 +254,24 @@ def contribute_endpoint():
                     
             except Exception as upload_error:
                 print(f"Error uploading {filename} to Supabase Storage: {upload_error}")
+                raise upload_error
         
         except Exception as e:
             print(f"Error saving to Supabase: {e}")
+            # Don't fail the request if Supabase upload fails
+            # but keep the error information
+            return jsonify({
+                "status": "partial_success", 
+                "message": "Contribution saved locally but not to cloud storage",
+                "error": str(e)
+            }), 207
         
-        return jsonify({"status": "success", "message": "Video processed and saved successfully"}), 200
+        return jsonify({
+            "status": "success",
+            "message": "Contribution received successfully",
+            "sign": sign_name,
+            "id": unique_id
+        }), 200
 
     except ValueError as ve:
         return jsonify({"status": "error", "error": str(ve), "message": "Validation failed"}), 400
@@ -277,13 +279,6 @@ def contribute_endpoint():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "error": str(e), "message": "Server error occurred"}), 500
-
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
 
 if __name__ == "__main__":
     # Configuration from config.py
