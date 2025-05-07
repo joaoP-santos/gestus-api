@@ -158,11 +158,36 @@
         font-style: italic;
         color: #666;
       }
+
+      /* Navigation buttons */
+      .nav-buttons {
+        text-align: center;
+        margin: 20px 0;
+      }
+
+      .nav-buttons a {
+        display: inline-block;
+        padding: 10px 20px;
+        background-color: #2196f3;
+        color: white;
+        text-decoration: none;
+        border-radius: 5px;
+        margin: 0 10px;
+      }
+
+      .nav-buttons a.contribute-btn {
+        background-color: #ff9800;
+      }
     </style>
   </head>
   <body>
     <div class="container">
       <h1>Sign Language Recognition</h1>
+
+      <div class="nav-buttons">
+        <a href="#" class="active">Recognition</a>
+        <a href="/contribute" class="contribute-btn">Contribute to Dataset</a>
+      </div>
 
       <div class="tabs">
         <div class="tab active" onclick="switchTab('record')">Record</div>
