@@ -236,7 +236,7 @@ def contribute_endpoint():
                 file_content = f.read()
             
             # Use the sign name as the folder name
-            storage_path = f"{sign_name}/{filename}"
+            storage_path = f"landmarks/{sign_name}/{filename}"
                 
             # Upload the file to Supabase
             try:
