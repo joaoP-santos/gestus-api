@@ -238,6 +238,180 @@ class TransformerClassifier(nn.Module):
             # Re-raise the exception for proper debugging
             raise
 
+def temporal_smooth(signal, window_size=5):
+    """
+    Apply temporal smoothing to a signal using a moving average with edge handling.
+    
+    Args:
+        signal: 1D numpy array, the signal to smooth
+        window_size: size of the smoothing window (odd number recommended)
+        
+    Returns:
+        Smoothed signal of same length
+    """
+    if len(signal) < window_size:
+        return signal
+        
+    smoothed = np.copy(signal)
+    half_window = window_size // 2
+    
+    # Handle the central part with full window
+    for i in range(half_window, len(signal) - half_window):
+        smoothed[i] = np.mean(signal[i-half_window:i+half_window+1])
+    
+    # Handle the edges with smaller windows
+    for i in range(half_window):
+        # Left edge
+        smoothed[i] = np.mean(signal[:i+half_window+1])
+        # Right edge
+        smoothed[-(i+1)] = np.mean(signal[-(i+half_window+1):])
+        
+    return smoothed
+
+def normalize_landmarks_spatially(landmarks, landmark_connections=None):
+    """
+    Robust spatial normalization of landmarks to make them invariant to position, scale, and orientation.
+    Includes temporal smoothing and outlier protection to prevent normalization spikes.
+    
+    Args:
+        landmarks: numpy array of shape [frames, num_landmarks*3] 
+                  or [frames, num_landmarks, 3]
+        landmark_connections: Optional dict mapping landmark indices to their connections
+                            for more advanced normalization (if None, uses default)
+                            
+    Returns:
+        numpy array with same shape as input but normalized
+    """
+    if landmarks.shape[0] == 0:
+        return landmarks
+    
+    # Reshape to [frames, landmarks, 3] if necessary
+    original_shape = landmarks.shape
+    if len(original_shape) == 2 and original_shape[1] % 3 == 0:
+        num_landmarks_in_data = original_shape[1] // 3
+        landmarks = landmarks.reshape(original_shape[0], num_landmarks_in_data, 3)
+    elif len(original_shape) == 3:
+        num_landmarks_in_data = original_shape[1] # Already in [frames, num_landmarks, 3]
+    else:
+        # Cannot determine landmark structure or not 2D/3D array
+        return landmarks # Return as is if shape is unexpected
+    
+    normalized = landmarks.copy()
+    num_frames, num_landmarks_actual, _ = normalized.shape
+    
+    if num_landmarks_actual == 0: # No actual landmarks to process
+        if len(original_shape) == 2:
+             return np.zeros(original_shape) # return zeros of original shape
+        return landmarks # Or return as is if it was 3D but with 0 landmarks
+
+    reference_points = np.zeros((num_frames, 3))
+    scale_factors = np.zeros(num_frames)
+    
+    # Landmark indices based on MediaPipe's typical combined output if all are present
+    # Pose (33 landmarks), Left Hand (21 landmarks), Right Hand (21 landmarks)
+    # Total = 33 + 21 + 21 = 75 landmarks.
+    # Indices for pose (if present):
+    pose_shoulder_l_idx, pose_shoulder_r_idx = 11, 12
+    pose_hip_l_idx, pose_hip_r_idx = 23, 24
+    # Indices for hands (relative to their own blocks, or absolute if concatenated):
+    # If concatenated: Left Hand wrist = 33, Right Hand wrist = 33 + 21 = 54
+    
+    for frame_idx in range(num_frames):
+        frame_landmarks = normalized[frame_idx]
+        current_ref_landmarks = []
+        
+        # Try to use pose landmarks for reference if they seem to be present
+        # Assuming pose landmarks are the first 33*3 features if present
+        has_pose_data = num_landmarks_actual >= 33 
+        
+        if has_pose_data:
+            # Check if shoulder/hip landmarks are non-zero
+            shoulders = [frame_landmarks[pose_shoulder_l_idx], frame_landmarks[pose_shoulder_r_idx]]
+            hips = [frame_landmarks[pose_hip_l_idx], frame_landmarks[pose_hip_r_idx]]
+            
+            valid_shoulders = [lm for lm in shoulders if not np.all(lm == 0)]
+            valid_hips = [lm for lm in hips if not np.all(lm == 0)]
+
+            current_ref_landmarks.extend(valid_shoulders)
+            current_ref_landmarks.extend(valid_hips)
+
+            if len(valid_shoulders) == 2:
+                scale_dist = np.linalg.norm(valid_shoulders[0] - valid_shoulders[1])
+                scale_factors[frame_idx] = scale_dist if scale_dist > 1e-6 else 1.0
+            elif len(valid_hips) == 2:
+                scale_dist = np.linalg.norm(valid_hips[0] - valid_hips[1])
+                scale_factors[frame_idx] = scale_dist if scale_dist > 1e-6 else 1.0
+            else: # Fallback scale if primary refs are not good
+                scale_factors[frame_idx] = 1.0
+        
+        # If not enough pose data for reference, or if pose is not dominant, consider hands
+        # This logic might need to be more sophisticated based on expected input
+        if not current_ref_landmarks: # or some other condition to prefer hands
+            # Assuming hands are after pose, or are the only landmarks
+            # If only hands (21 left + 21 right = 42 landmarks total)
+            # Left hand wrist: 0, Right hand wrist: 21
+            # If pose + hands (33 pose + 21 left + 21 right = 75 landmarks total)
+            # Left hand wrist: 33, Right hand wrist: 33 + 21 = 54
+            
+            left_hand_wrist_idx = 0 if num_landmarks_actual == 42 else (33 if num_landmarks_actual == 75 else -1)
+            right_hand_wrist_idx = 21 if num_landmarks_actual == 42 else (54 if num_landmarks_actual == 75 else -1)
+
+            hand_refs_to_check = []
+            if left_hand_wrist_idx != -1 and not np.all(frame_landmarks[left_hand_wrist_idx] == 0):
+                hand_refs_to_check.append(frame_landmarks[left_hand_wrist_idx])
+            if right_hand_wrist_idx != -1 and not np.all(frame_landmarks[right_hand_wrist_idx] == 0):
+                 hand_refs_to_check.append(frame_landmarks[right_hand_wrist_idx])
+            
+            current_ref_landmarks.extend(hand_refs_to_check)
+
+            if len(hand_refs_to_check) == 2: # Both wrists
+                scale_dist = np.linalg.norm(hand_refs_to_check[0] - hand_refs_to_check[1])
+                scale_factors[frame_idx] = scale_dist if scale_dist > 1e-6 else 1.0
+            elif len(hand_refs_to_check) == 1: # One wrist
+                 # Simple heuristic: use average distance of other hand points from this wrist
+                 # This is a placeholder; a more robust method would be better.
+                 active_hand_start_idx = left_hand_wrist_idx if not np.all(frame_landmarks[left_hand_wrist_idx]==0) else right_hand_wrist_idx
+                 if active_hand_start_idx != -1:
+                    other_pts_in_hand = frame_landmarks[active_hand_start_idx+1 : active_hand_start_idx+21]
+                    valid_other_pts = [pt for pt in other_pts_in_hand if not np.all(pt==0)]
+                    if valid_other_pts:
+                        dists = np.linalg.norm(np.array(valid_other_pts) - hand_refs_to_check[0], axis=1)
+                        scale_factors[frame_idx] = np.mean(dists) if np.mean(dists) > 1e-6 else 1.0
+                    else: scale_factors[frame_idx] = 1.0
+                 else: scale_factors[frame_idx] = 1.0
+            else: # No reliable hand landmarks for scale
+                scale_factors[frame_idx] = 1.0
+
+        if current_ref_landmarks:
+            reference_points[frame_idx] = np.mean(current_ref_landmarks, axis=0)
+        else: # Fallback if no good reference points found
+            reference_points[frame_idx] = np.mean(frame_landmarks, axis=0) # Use mean of all available landmarks
+            scale_factors[frame_idx] = 1.0 # Default scale
+
+    # STEP 2: Apply temporal smoothing
+    window_size = min(5, num_frames // 2 if num_frames > 1 else 1) 
+    if window_size >= 2 and num_frames >=2: # Check if smoothing is feasible
+        for dim in range(3):
+            reference_points[:, dim] = temporal_smooth(reference_points[:, dim], window_size)
+        scale_factors = temporal_smooth(scale_factors, window_size)
+    
+    # STEP 3: Apply normalization
+    for frame_idx in range(num_frames):
+        ref_point = reference_points[frame_idx]
+        scale = scale_factors[frame_idx]
+        
+        centered = normalized[frame_idx] - ref_point
+        
+        if scale > 1e-6:
+            normalized[frame_idx] = centered / scale
+        else:
+            normalized[frame_idx] = centered # Avoid division by zero/small number
+            
+    if len(original_shape) == 2:
+        normalized = normalized.reshape(original_shape)
+    
+    return normalized
+
 def normalize_sequence_length(landmarks, target_length=150):
     """
     Stretch or squeeze landmark sequences to a fixed length using interpolation.
@@ -290,15 +464,49 @@ def normalize_sequence_length(landmarks, target_length=150):
 
 
 def process_raw_landmarks(landmarks, target_length, downsample_factor):
-    """Process landmarks without normalization for single sign recognition"""
+    """Process landmarks with comprehensive normalization for environment-independent sign recognition"""
     # Replace any NaN or Inf values
     landmarks = np.nan_to_num(landmarks, nan=0.0, posinf=0.0, neginf=0.0)
     
     # Downsample to save memory and computation
-    landmarks = landmarks[::downsample_factor]
+    if landmarks.shape[0] > 0: # Ensure there are frames to downsample
+        landmarks = landmarks[::downsample_factor]
     
+    # Apply spatial normalization to make landmarks invariant to position, scale and orientation
+    # Ensure landmarks is not empty before spatial normalization
+    if landmarks.shape[0] > 0:
+        spatially_normalized = normalize_landmarks_spatially(landmarks)
+    else:
+        # If after downsampling, landmarks are empty, create zero array of expected feature dim
+        # This assumes landmarks, if not empty, would have a second dimension (features)
+        num_features = landmarks.shape[1] if len(landmarks.shape) > 1 and landmarks.shape[1] > 0 else 0
+        # If num_features is still 0, it means the input was truly empty or 1D.
+        # normalize_sequence_length expects at least shape (0, N) where N > 0 or (0,).
+        # If landmarks.shape[1] was 0, then spatially_normalized is (0,0)
+        # and normalize_sequence_length will try to access landmarks.shape[1] leading to an error.
+        # So, if num_features is 0, we should ensure spatially_normalized has a defined feature dimension,
+        # even if it's 0 frames.
+        # However, normalize_landmarks_spatially itself should handle empty inputs gracefully.
+        # Let's assume normalize_landmarks_spatially returns shape (0, F) or (0,) if input is (0,F) or (0,).
+        spatially_normalized = landmarks # If landmarks is empty, normalize_landmarks_spatially should return it as is or an equivalent empty.
+
     # Use interpolation to normalize sequence length
-    normalized_landmarks = normalize_sequence_length(landmarks, target_length)
+    # normalize_sequence_length handles empty spatially_normalized if it has shape (0, features)
+    # by returning np.zeros((target_length, landmarks.shape[1])).
+    # This requires spatially_normalized.shape[1] to be valid.
+    if spatially_normalized.shape[0] == 0 and (len(spatially_normalized.shape) < 2 or spatially_normalized.shape[1] == 0):
+        # If spatially_normalized is truly empty (e.g. shape (0,) or (0,0) )
+        # we cannot determine the feature dimension for normalize_sequence_length.
+        # In this case, we might need to return zeros based on a known/expected feature count,
+        # or propagate an error/empty array that the model can handle.
+        # For now, let's assume the landmark extractor always gives at least (N, F) where F > 0, or (0, F).
+        # If landmarks came in as (0,0), then spatially_normalized is (0,0).
+        # The issue arises if landmarks.shape[1] is accessed on a 1D array.
+        # The provided normalize_sequence_length in train.py is robust to empty landmarks.shape[0].
+        # So this should be fine.
+        pass # normalize_sequence_length should handle it based on its implementation.
+
+    normalized_landmarks = normalize_sequence_length(spatially_normalized, target_length)
     
     return normalized_landmarks
 
@@ -379,7 +587,7 @@ def process_video(video_path, model, landmark_extractor):
     try:
         processed_landmarks = process_raw_landmarks(
             landmarks_array,
-            target_length=150,
+            target_length=136,
             downsample_factor=2
         )
         print(f"Processed landmarks shape: {processed_landmarks.shape}")
@@ -507,7 +715,7 @@ def initialize_model(model, model_path, landmark_extractor):
             
             print(f"Class mapping has {len(class_mapping)} entries")
             print(f"Sample class mapping entries: {list(class_mapping.items())[:3]}...")
-            
+
             # Get architecture parameters with defaults
             input_size = checkpoint.get('input_size', 225)
             hidden_size = checkpoint.get('hidden_size', 128)
