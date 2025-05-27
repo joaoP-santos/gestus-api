@@ -285,6 +285,67 @@ def contribute_endpoint():
             except Exception:
                 pass
 
+@app.route("/get-sample-video", methods=["GET"])
+def get_sample_video():
+    print(request)
+    """Return a sample video URL for a given sign."""
+    sign_name = request.args.get('sign')
+    
+    if not sign_name:
+        return jsonify({"status": "error", "error": "Sign name is required"}), 400
+    
+    try:
+        bucket_name = config.SUPABASE_BUCKET
+
+        try:
+            file_path = f"samples/{sign_name}.mp4"
+            
+            # Generate a signed URL for the video (valid for 1 hour)
+            signed_url = supabase.storage.from_(bucket_name).create_signed_url(file_path, 3600)
+            
+            if signed_url.get('error'):
+                return jsonify({"status": "error", "error": "Failed to generate video URL"}), 500
+            
+            return jsonify({
+                "status": "success", 
+                "video_url": signed_url['signedURL'],
+            }), 200
+            
+        except Exception as storage_error:
+            print(f"Storage error: {storage_error}")
+            return jsonify({"status": "error", "error": "Failed to access sample videos"}), 500
+            
+    except Exception as e:
+        print(f"Error fetching sample video: {e}")
+        return jsonify({"status": "error", "error": "Server error occurred"}), 500
+
+@app.route("/debug-storage", methods=["GET"])
+def debug_storage():
+    """Debug endpoint to see what's in Supabase storage."""
+    try:
+        bucket_name = config.SUPABASE_BUCKET
+        
+        # List root contents
+        root_contents = supabase.storage.from_(bucket_name).list()
+        
+        # List samples folder if it exists
+        samples_contents = []
+        try:
+            samples_contents = supabase.storage.from_(bucket_name).list("samples")
+        except Exception as e:
+            print(f"Error listing samples folder: {e}")
+        
+        return jsonify({
+            "status": "success",
+            "bucket": bucket_name,
+            "root_contents": [{"name": f["name"], "type": f.get("metadata", {}).get("mimetype", "unknown")} for f in root_contents],
+            "samples_contents": [{"name": f["name"], "type": f.get("metadata", {}).get("mimetype", "unknown")} for f in samples_contents]
+        }), 200
+        
+    except Exception as e:
+        print(f"Error in debug storage: {e}")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
 if __name__ == "__main__":
     # Configuration from config.py
     port = config.PORT
