@@ -32,9 +32,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model_path = config.MODEL_PATH
 model, landmark_extractor = initialize_model(None, model_path, None)
 
-# Dataset storage setup
-os.makedirs('dataset', exist_ok=True)
-
 @app.route("/", methods=["GET"])
 def health_check():
     """Health check endpoint."""
@@ -83,63 +80,127 @@ def process_endpoint():
 
 @app.route("/get-random-sign", methods=["GET"])
 def get_random_sign():
-    """Return a random sign for the user to record."""
-    random_sign = random.choice(app.config['SIGNS'])
-    return jsonify({"sign": random_sign})
+    """Return the sign with the least number of samples for the user to record."""
+    try:
+        # Count Supabase files only (no local file counting)
+        supabase_sample_counts = {}
+        try:
+            bucket_name = config.SUPABASE_BUCKET
+            
+            # Try to list the landmarks folder to see what sign folders exist
+            try:
+                folders = supabase.storage.from_(bucket_name).list("landmarks")
+                
+                for folder in folders:
+                    if folder['name'] in app.config['SIGNS']:
+                        # List files in this sign folder
+                        try:
+                            files = supabase.storage.from_(bucket_name).list(f"landmarks/{folder['name']}")
+                            json_files = [f for f in files if f['name'].endswith('.json')]
+                            supabase_sample_counts[folder['name']] = len(json_files)
+                        except:
+                            # If folder doesn't exist or is empty, count as 0
+                            supabase_sample_counts[folder['name']] = 0
+            except:
+                # If landmarks folder doesn't exist, check root level files as fallback
+                try:
+                    response = supabase.storage.from_(bucket_name).list()
+                    
+                    for file in response:
+                        if file['name'].endswith('.json'):
+                            # Extract sign name from filename format: sign_name_timestamp.json
+                            sign_name = file['name'].split('_')[0]
+                            if sign_name in app.config['SIGNS']:
+                                supabase_sample_counts[sign_name] = supabase_sample_counts.get(sign_name, 0) + 1
+                except:
+                    # If everything fails, just continue with empty supabase counts
+                    pass
+        except Exception as e:
+            print(f"Error fetching Supabase storage stats: {e}")
+            # Don't fail the request if Supabase stats fail
+        
+        # Initialize all signs with 0 count if not already in supabase_sample_counts
+        sign_counts = {}
+        for sign in app.config['SIGNS']:
+            sign_counts[sign] = supabase_sample_counts.get(sign, 0)
+        
+        # Find sign(s) with minimum count
+        min_count = min(sign_counts.values()) if sign_counts else 0
+        signs_with_min_count = [sign for sign, count in sign_counts.items() if count == min_count]
+        
+        # If multiple signs have the same minimum count, choose randomly among them
+        selected_sign = random.choice(signs_with_min_count)
+        
+        return jsonify({
+            "sign": selected_sign,
+            "current_count": min_count,
+            "all_counts": sign_counts
+        })
+        
+    except Exception as e:
+        # Fallback to random selection if there's any error
+        print(f"Error in get_random_sign: {e}")
+        random_sign = random.choice(app.config['SIGNS'])
+        return jsonify({"sign": random_sign})
 
 @app.route("/dataset-stats", methods=["GET"])
 def get_dataset_stats():
-    """Return statistics about the dataset."""
+    """Return statistics about the dataset from Supabase storage only."""
     try:
-        # Count files in the dataset directory
-        dataset_path = "dataset"
-        total_samples = 0
-        sample_counts = {}
-        
-        # Check if the directory exists
-        if os.path.exists(dataset_path):
-            for filename in os.listdir(dataset_path):
-                if filename.endswith('.json'):
-                    total_samples += 1
-                    
-                    # Extract sign name from filename format: sign_name_timestamp.json
-                    sign_name = filename.split('_')[0]
-                    sample_counts[sign_name] = sample_counts.get(sign_name, 0) + 1
-        
-        # Also get stats from Supabase if credentials are available
+        # Get stats from Supabase storage only
         supabase_stats = {
             "totalSupabaseSamples": 0,
             "supabaseSampleCounts": {}
         }
         
         try:
-            # List files from Supabase storage
             bucket_name = config.SUPABASE_BUCKET
-            response = supabase.storage.from_(bucket_name).list()
             
-            for file in response:
-                if file['name'].endswith('.json'):
-                    supabase_stats["totalSupabaseSamples"] += 1
+            # Try to list the landmarks folder to see what sign folders exist
+            try:
+                folders = supabase.storage.from_(bucket_name).list("landmarks")
+                
+                for folder in folders:
+                    if folder['name'] in app.config['SIGNS']:
+                        # List files in this sign folder
+                        try:
+                            files = supabase.storage.from_(bucket_name).list(f"landmarks/{folder['name']}")
+                            json_files = [f for f in files if f['name'].endswith('.json')]
+                            count = len(json_files)
+                            supabase_stats["supabaseSampleCounts"][folder['name']] = count
+                            supabase_stats["totalSupabaseSamples"] += count
+                        except:
+                            # If folder doesn't exist or is empty, count as 0
+                            supabase_stats["supabaseSampleCounts"][folder['name']] = 0
+            except:
+                # If landmarks folder doesn't exist, check root level files as fallback
+                try:
+                    response = supabase.storage.from_(bucket_name).list()
                     
-                    # Extract sign name from filename format: sign_name_timestamp.json
-                    sign_name = file['name'].split('_')[0]
-                    if sign_name in app.config['SIGNS']:  # Ensure it's a valid sign
-                        supabase_stats["supabaseSampleCounts"][sign_name] = supabase_stats["supabaseSampleCounts"].get(sign_name, 0) + 1
+                    for file in response:
+                        if file['name'].endswith('.json'):
+                            supabase_stats["totalSupabaseSamples"] += 1
+                            
+                            # Extract sign name from filename format: sign_name_timestamp.json
+                            sign_name = file['name'].split('_')[0]
+                            if sign_name in app.config['SIGNS']:  # Ensure it's a valid sign
+                                supabase_stats["supabaseSampleCounts"][sign_name] = supabase_stats["supabaseSampleCounts"].get(sign_name, 0) + 1
+                except:
+                    # If everything fails, just continue with empty supabase counts
+                    pass
         except Exception as e:
             print(f"Error fetching Supabase storage stats: {e}")
             # Don't fail the request if Supabase stats fail
         
+        # Initialize all signs with 0 count if not in supabase counts
+        all_sign_counts = {}
+        for sign in app.config['SIGNS']:
+            all_sign_counts[sign] = supabase_stats["supabaseSampleCounts"].get(sign, 0)
+        
         return jsonify({
-            "localStats": {
-                "totalSamples": total_samples,
-                "sampleCounts": sample_counts
-            },
             "supabaseStats": supabase_stats,
-            "totalSamples": total_samples + supabase_stats["totalSupabaseSamples"],
-            "combinedCounts": {
-                sign: sample_counts.get(sign, 0) + supabase_stats["supabaseSampleCounts"].get(sign, 0)
-                for sign in set(list(sample_counts.keys()) + list(supabase_stats["supabaseSampleCounts"].keys()))
-            }
+            "totalSamples": supabase_stats["totalSupabaseSamples"],
+            "sampleCounts": all_sign_counts
         })
     except Exception as e:
         traceback.print_exc()
@@ -219,55 +280,40 @@ def contribute_endpoint():
         
         # Make sure we actually have landmarks before proceeding
         if not landmarks_sequence:
-            raise ValueError("No landmarks could be extracted from the video. Please ensure your hands are clearly visible.")
-
-        # Create a timestamp and unique ID for the file name
-        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-        unique_id = str(uuid.uuid4())[:8]  # First 8 chars of UUID
-        
-        # Create metadata
+            raise ValueError("No landmarks could be extracted from the video. Please ensure your hands are clearly visible.")        # Create metadata
         metadata = {
             "sign": sign_name,
             "landmarks": landmarks_sequence
         }
         
-        # Save to local file
+        # Create a timestamp and unique ID for the file name
+        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+        unique_id = str(uuid.uuid4())[:8]  # First 8 chars of UUID
         filename = f"{sign_name}_{timestamp}_{unique_id}.json"
-        filepath = os.path.join("dataset", filename)
         
-        with open(filepath, 'w') as f:
-            json.dump(metadata, f)
-            
-        # Upload to Supabase storage
+        # Upload directly to Supabase storage (no local file creation)
         try:
             bucket_name = config.SUPABASE_BUCKET
             
-            # Directly try to upload to the existing bucket
-            with open(filepath, 'rb') as f:
-                file_content = f.read()
+            # Convert metadata to JSON string and encode as bytes
+            json_data = json.dumps(metadata)
+            file_content = json_data.encode('utf-8')
             
             # Use the sign name as the folder name
             storage_path = f"landmarks/{sign_name}/{filename}"
                 
-            # Upload the file to Supabase - use the simplified API that doesn't need bucket check
-            try:
-                result = supabase.storage.from_(bucket_name).upload(
-                    path=storage_path, 
-                    file=file_content,
-                    file_options={"content-type": "application/json"}
-                )
-                print(f"Successfully uploaded {filename} to Supabase Storage bucket: {bucket_name} in folder: {sign_name}")
-                
-                # Delete the local file after successful upload to Supabase
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-                    print(f"Deleted local file: {filepath}")
+            # Upload the file to Supabase directly
+            result = supabase.storage.from_(bucket_name).upload(
+                path=storage_path, 
+                file=file_content,
+                file_options={"content-type": "application/json"}
+            )
+            print(f"Successfully uploaded {filename} to Supabase Storage bucket: {bucket_name} in folder: {sign_name}")
                     
-            except Exception as upload_error:
-                print(f"Error uploading {filename} to Supabase Storage: {upload_error}")
-        
         except Exception as e:
             print(f"Error saving to Supabase: {e}")
+            # Return error if Supabase upload fails since we're not saving locally anymore
+            return jsonify({"status": "error", "error": "Failed to save to cloud storage", "message": "Upload failed"}), 500
         
         return jsonify({"status": "success", "message": "Video processed and saved successfully"}), 200
 
@@ -345,6 +391,129 @@ def debug_storage():
     except Exception as e:
         print(f"Error in debug storage: {e}")
         return jsonify({"status": "error", "error": str(e)}), 500
+
+@app.route("/dataset-samples", methods=["GET"])
+def get_dataset_samples():
+    """Return dataset samples with their landmark data."""
+    try:
+        samples = []
+        
+        try:
+            bucket_name = config.SUPABASE_BUCKET
+            
+            # Try to list the landmarks folder to see what sign folders exist
+            try:
+                folders = supabase.storage.from_(bucket_name).list("landmarks")
+                
+                for folder in folders:
+                    if folder['name'] in app.config['SIGNS']:
+                        # List files in this sign folder
+                        try:
+                            files = supabase.storage.from_(bucket_name).list(f"landmarks/{folder['name']}")
+                            json_files = [f for f in files if f['name'].endswith('.json')]
+                            
+                            # Limit to most recent 10 files per sign to avoid overwhelming the response
+                            json_files = sorted(json_files, key=lambda x: x.get('updated_at', ''), reverse=True)[:10]
+                            
+                            for file in json_files:
+                                try:
+                                    # Download the landmark file
+                                    file_path = f"landmarks/{folder['name']}/{file['name']}"
+                                    response = supabase.storage.from_(bucket_name).download(file_path)
+                                    
+                                    if response:
+                                        import json
+                                        landmark_data = json.loads(response.decode('utf-8'))
+                                        
+                                        # Extract timestamp from filename or use file metadata
+                                        timestamp = file.get('updated_at') or file.get('created_at') or ''
+                                        
+                                        # Create sample entry
+                                        sample = {
+                                            "id": file['name'].replace('.json', ''),
+                                            "sign": folder['name'],
+                                            "timestamp": timestamp,
+                                            "landmarks": landmark_data.get('landmarks', []),
+                                            "metadata": {
+                                                "fps": landmark_data.get('fps', 30),
+                                                "frame_count": len(landmark_data.get('landmarks', [])),
+                                                "duration": landmark_data.get('duration'),
+                                                "width": landmark_data.get('width'),
+                                                "height": landmark_data.get('height')
+                                            }
+                                        }
+                                        samples.append(sample)
+                                        
+                                except Exception as e:
+                                    print(f"Error processing file {file['name']}: {e}")
+                                    continue
+                                    
+                        except Exception as e:
+                            print(f"Error listing files in folder {folder['name']}: {e}")
+                            continue
+                            
+            except Exception as e:
+                print(f"Error listing landmarks folder: {e}")
+                # If landmarks folder doesn't exist, check root level files as fallback
+                try:
+                    response = supabase.storage.from_(bucket_name).list()
+                    json_files = [f for f in response if f['name'].endswith('.json')]
+                    
+                    # Limit to most recent 50 files to avoid overwhelming the response
+                    json_files = sorted(json_files, key=lambda x: x.get('updated_at', ''), reverse=True)[:50]
+                    
+                    for file in json_files:
+                        try:
+                            # Extract sign name from filename format: sign_name_timestamp.json
+                            sign_name = file['name'].split('_')[0]
+                            if sign_name not in app.config['SIGNS']:
+                                continue
+                                
+                            # Download the landmark file
+                            response = supabase.storage.from_(bucket_name).download(file['name'])
+                            
+                            if response:
+                                import json
+                                landmark_data = json.loads(response.decode('utf-8'))
+                                
+                                timestamp = file.get('updated_at') or file.get('created_at') or ''
+                                
+                                sample = {
+                                    "id": file['name'].replace('.json', ''),
+                                    "sign": sign_name,
+                                    "timestamp": timestamp,
+                                    "landmarks": landmark_data.get('landmarks', []),
+                                    "metadata": {
+                                        "fps": landmark_data.get('fps', 30),
+                                        "frame_count": len(landmark_data.get('landmarks', [])),
+                                        "duration": landmark_data.get('duration'),
+                                        "width": landmark_data.get('width'),
+                                        "height": landmark_data.get('height')
+                                    }
+                                }
+                                samples.append(sample)
+                                
+                        except Exception as e:
+                            print(f"Error processing root file {file['name']}: {e}")
+                            continue
+                            
+                except Exception as e:
+                    print(f"Error listing root files: {e}")
+                    
+        except Exception as e:
+            print(f"Error fetching Supabase samples: {e}")
+        
+        # Sort samples by timestamp (most recent first)
+        samples = sorted(samples, key=lambda x: x['timestamp'], reverse=True)
+        
+        return jsonify({
+            "samples": samples,
+            "total_samples": len(samples)
+        })
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"Error getting dataset samples: {str(e)}"}), 500
 
 if __name__ == "__main__":
     # Configuration from config.py
