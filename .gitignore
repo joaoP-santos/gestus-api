@@ -3,3 +3,4 @@
 /*.pyc
 debug/__pycache__/
 .vercel
+.env
