@@ -22,7 +22,13 @@ app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Initialize Supabase client
-supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
+try:
+    supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
+    print("Supabase client initialized successfully")
+except Exception as e:
+    print(f"Error initializing Supabase client: {e}")
+    # Create a dummy client to prevent crashes
+    supabase = None
 
 # Configuration from config.py
 app.config['SIGNS'] = config.SIGNS
@@ -81,10 +87,13 @@ def process_endpoint():
 @app.route("/get-random-sign", methods=["GET"])
 def get_random_sign():
     """Return the sign with the least number of samples for the user to record."""
-    try:
-        # Count Supabase files only (no local file counting)
+    try:        # Count Supabase files only (no local file counting)
         supabase_sample_counts = {}
         try:
+            if supabase is None:
+                print("Warning: Supabase client not available for get-random-sign")
+                raise Exception("Supabase client not available")
+                
             bucket_name = config.SUPABASE_BUCKET
             
             # Try to list the landmarks folder to see what sign folders exist
@@ -147,18 +156,27 @@ def get_random_sign():
 def get_dataset_stats():
     """Return statistics about the dataset from Supabase storage only."""
     try:
+        print("Starting dataset stats request...")
+        
         # Get stats from Supabase storage only
         supabase_stats = {
             "totalSupabaseSamples": 0,
             "supabaseSampleCounts": {}
-        }
-        
+        }        
         try:
+            print("Attempting to connect to Supabase...")
+            if supabase is None:
+                print("Error: Supabase client is not initialized")
+                raise Exception("Supabase client not available")
+                
             bucket_name = config.SUPABASE_BUCKET
+            print(f"Using bucket: {bucket_name}")
             
             # Try to list the landmarks folder to see what sign folders exist
             try:
+                print("Listing landmarks folder...")
                 folders = supabase.storage.from_(bucket_name).list("landmarks")
+                print(f"Found {len(folders)} folders in landmarks")
                 
                 for folder in folders:
                     if folder['name'] in app.config['SIGNS']:
@@ -169,13 +187,17 @@ def get_dataset_stats():
                             count = len(json_files)
                             supabase_stats["supabaseSampleCounts"][folder['name']] = count
                             supabase_stats["totalSupabaseSamples"] += count
-                        except:
+                        except Exception as folder_e:
+                            print(f"Error listing files in folder {folder['name']}: {folder_e}")
                             # If folder doesn't exist or is empty, count as 0
                             supabase_stats["supabaseSampleCounts"][folder['name']] = 0
-            except:
+            except Exception as landmarks_e:
+                print(f"Landmarks folder error: {landmarks_e}")
                 # If landmarks folder doesn't exist, check root level files as fallback
                 try:
+                    print("Trying root level files...")
                     response = supabase.storage.from_(bucket_name).list()
+                    print(f"Found {len(response)} files in root")
                     
                     for file in response:
                         if file['name'].endswith('.json'):
@@ -185,11 +207,13 @@ def get_dataset_stats():
                             sign_name = file['name'].split('_')[0]
                             if sign_name in app.config['SIGNS']:  # Ensure it's a valid sign
                                 supabase_stats["supabaseSampleCounts"][sign_name] = supabase_stats["supabaseSampleCounts"].get(sign_name, 0) + 1
-                except:
+                except Exception as root_e:
+                    print(f"Root level files error: {root_e}")
                     # If everything fails, just continue with empty supabase counts
                     pass
         except Exception as e:
             print(f"Error fetching Supabase storage stats: {e}")
+            traceback.print_exc()
             # Don't fail the request if Supabase stats fail
         
         # Initialize all signs with 0 count if not in supabase counts
@@ -197,12 +221,15 @@ def get_dataset_stats():
         for sign in app.config['SIGNS']:
             all_sign_counts[sign] = supabase_stats["supabaseSampleCounts"].get(sign, 0)
         
+        print(f"Returning stats: {len(all_sign_counts)} signs, {supabase_stats['totalSupabaseSamples']} total samples")
+        
         return jsonify({
             "supabaseStats": supabase_stats,
             "totalSamples": supabase_stats["totalSupabaseSamples"],
             "sampleCounts": all_sign_counts
         })
     except Exception as e:
+        print(f"Critical error in dataset-stats: {e}")
         traceback.print_exc()
         return jsonify({"error": f"Error getting dataset stats: {str(e)}"}), 500
 
@@ -516,6 +543,22 @@ def get_dataset_samples():
         return jsonify({"error": f"Error getting dataset samples: {str(e)}"}), 500
 
 if __name__ == "__main__":
+    print("Starting Gestus API...")
+    print(f"Model path: {config.MODEL_PATH}")
+    print(f"Supabase URL: {config.SUPABASE_URL}")
+    print(f"Available signs: {len(config.SIGNS)}")
+    print(f"Port: {config.PORT}")
+    
+    # Test Supabase connection
+    try:
+        print("Testing Supabase connection...")
+        bucket_name = config.SUPABASE_BUCKET
+        supabase.storage.from_(bucket_name).list()
+        print("Supabase connection successful!")
+    except Exception as e:
+        print(f"Warning: Supabase connection failed: {e}")
+        print("The API will continue but dataset stats may not work properly.")
+    
     # Configuration from config.py
     port = config.PORT
     debug = config.FLASK_ENV == "development"
