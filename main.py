@@ -421,7 +421,7 @@ def debug_storage():
 
 @app.route("/dataset-samples", methods=["GET"])
 def get_dataset_samples():
-    """Return dataset samples with their landmark data."""
+    """Return dataset samples metadata (without landmark data for performance)."""
     try:
         samples = []
         
@@ -437,39 +437,27 @@ def get_dataset_samples():
                         # List files in this sign folder
                         try:
                             files = supabase.storage.from_(bucket_name).list(f"landmarks/{folder['name']}")
-                            json_files = [f for f in files if f['name'].endswith('.json')]
-                            
-                            # Limit to most recent 10 files per sign to avoid overwhelming the response
-                            json_files = sorted(json_files, key=lambda x: x.get('updated_at', ''), reverse=True)[:10]
+                            json_files = [f for f in files if f['name'].endswith('.json')]                            # Limit to most recent 5 files per sign to reduce load
+                            json_files = sorted(json_files, key=lambda x: x.get('updated_at', ''), reverse=True)[:5]
                             
                             for file in json_files:
                                 try:
-                                    # Download the landmark file
-                                    file_path = f"landmarks/{folder['name']}/{file['name']}"
-                                    response = supabase.storage.from_(bucket_name).download(file_path)
+                                    # Extract timestamp from filename or use file metadata
+                                    timestamp = file.get('updated_at') or file.get('created_at') or ''
                                     
-                                    if response:
-                                        import json
-                                        landmark_data = json.loads(response.decode('utf-8'))
-                                        
-                                        # Extract timestamp from filename or use file metadata
-                                        timestamp = file.get('updated_at') or file.get('created_at') or ''
-                                        
-                                        # Create sample entry
-                                        sample = {
-                                            "id": file['name'].replace('.json', ''),
-                                            "sign": folder['name'],
-                                            "timestamp": timestamp,
-                                            "landmarks": landmark_data.get('landmarks', []),
-                                            "metadata": {
-                                                "fps": landmark_data.get('fps', 30),
-                                                "frame_count": len(landmark_data.get('landmarks', [])),
-                                                "duration": landmark_data.get('duration'),
-                                                "width": landmark_data.get('width'),
-                                                "height": landmark_data.get('height')
-                                            }
+                                    # Create sample entry WITHOUT landmarks for performance
+                                    sample = {
+                                        "id": file['name'].replace('.json', ''),
+                                        "sign": folder['name'],
+                                        "timestamp": timestamp,
+                                        "metadata": {
+                                            "fps": 30,  # Default value
+                                            "duration": None,
+                                            "width": None,
+                                            "height": None
                                         }
-                                        samples.append(sample)
+                                    }
+                                    samples.append(sample)
                                         
                                 except Exception as e:
                                     print(f"Error processing file {file['name']}: {e}")
@@ -485,40 +473,29 @@ def get_dataset_samples():
                 try:
                     response = supabase.storage.from_(bucket_name).list()
                     json_files = [f for f in response if f['name'].endswith('.json')]
-                    
-                    # Limit to most recent 50 files to avoid overwhelming the response
+                      # Limit to most recent 50 files to avoid overwhelming the response
                     json_files = sorted(json_files, key=lambda x: x.get('updated_at', ''), reverse=True)[:50]
-                    
                     for file in json_files:
-                        try:
-                            # Extract sign name from filename format: sign_name_timestamp.json
+                        try:                            # Extract sign name from filename format: sign_name_timestamp.json
                             sign_name = file['name'].split('_')[0]
                             if sign_name not in app.config['SIGNS']:
                                 continue
                                 
-                            # Download the landmark file
-                            response = supabase.storage.from_(bucket_name).download(file['name'])
+                            timestamp = file.get('updated_at') or file.get('created_at') or ''
                             
-                            if response:
-                                import json
-                                landmark_data = json.loads(response.decode('utf-8'))
-                                
-                                timestamp = file.get('updated_at') or file.get('created_at') or ''
-                                
-                                sample = {
-                                    "id": file['name'].replace('.json', ''),
-                                    "sign": sign_name,
-                                    "timestamp": timestamp,
-                                    "landmarks": landmark_data.get('landmarks', []),
-                                    "metadata": {
-                                        "fps": landmark_data.get('fps', 30),
-                                        "frame_count": len(landmark_data.get('landmarks', [])),
-                                        "duration": landmark_data.get('duration'),
-                                        "width": landmark_data.get('width'),
-                                        "height": landmark_data.get('height')
-                                    }
+                            # Create sample entry WITHOUT landmarks for performance
+                            sample = {
+                                "id": file['name'].replace('.json', ''),
+                                "sign": sign_name,
+                                "timestamp": timestamp,
+                                "metadata": {
+                                    "fps": 30,  # Default value
+                                    "duration": None,
+                                    "width": None,
+                                    "height": None
                                 }
-                                samples.append(sample)
+                            }
+                            samples.append(sample)
                                 
                         except Exception as e:
                             print(f"Error processing root file {file['name']}: {e}")
@@ -541,6 +518,82 @@ def get_dataset_samples():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": f"Error getting dataset samples: {str(e)}"}), 500
+
+@app.route("/sample-landmarks/<sample_id>", methods=["GET"])
+def get_sample_landmarks(sample_id):
+    """Return landmarks for a specific sample."""
+    try:
+        bucket_name = config.SUPABASE_BUCKET
+        
+        # Try to find the sample file by searching through the landmarks folder structure
+        try:
+            # First check organized landmarks folder structure
+            folders = supabase.storage.from_(bucket_name).list("landmarks")
+            
+            for folder in folders:
+                if folder['name'] in app.config['SIGNS']:
+                    try:
+                        files = supabase.storage.from_(bucket_name).list(f"landmarks/{folder['name']}")
+                        
+                        for file in files:
+                            if file['name'].replace('.json', '') == sample_id:
+                                file_path = f"landmarks/{folder['name']}/{file['name']}"
+                                response = supabase.storage.from_(bucket_name).download(file_path)
+                                
+                                if response:
+                                    import json
+                                    landmark_data = json.loads(response.decode('utf-8'))
+                                    
+                                    return jsonify({
+                                        "landmarks": landmark_data.get('landmarks', []),
+                                        "metadata": {
+                                            "fps": landmark_data.get('fps', 30),
+                                            "frame_count": len(landmark_data.get('landmarks', [])),
+                                            "duration": landmark_data.get('duration'),
+                                            "width": landmark_data.get('width'),
+                                            "height": landmark_data.get('height')
+                                        }
+                                    })
+                                    
+                    except Exception as e:
+                        print(f"Error searching in folder {folder['name']}: {e}")
+                        continue
+                        
+        except Exception as e:
+            print(f"Error searching landmarks folder: {e}")
+            
+        # Fallback: check root level files
+        try:
+            response = supabase.storage.from_(bucket_name).list()
+            json_files = [f for f in response if f['name'].endswith('.json')]
+            
+            for file in json_files:
+                if file['name'].replace('.json', '') == sample_id:
+                    response = supabase.storage.from_(bucket_name).download(file['name'])
+                    
+                    if response:
+                        import json
+                        landmark_data = json.loads(response.decode('utf-8'))
+                        
+                        return jsonify({
+                            "landmarks": landmark_data.get('landmarks', []),
+                            "metadata": {
+                                "fps": landmark_data.get('fps', 30),
+                                "frame_count": len(landmark_data.get('landmarks', [])),
+                                "duration": landmark_data.get('duration'),
+                                "width": landmark_data.get('width'),
+                                "height": landmark_data.get('height')
+                            }
+                        })
+                        
+        except Exception as e:
+            print(f"Error searching root files: {e}")
+            
+        return jsonify({"error": "Sample not found"}), 404
+        
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"Error getting sample landmarks: {str(e)}"}), 500
 
 if __name__ == "__main__":
     print("Starting Gestus API...")
