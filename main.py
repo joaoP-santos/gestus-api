@@ -15,7 +15,7 @@ from supabase import create_client, Client
 # Import configuration from config.py
 import config
 
-from utils import initialize_model, process_video, MediaPipeLandmarkExtractor
+from utils import initialize_model, process_single_sign, MediaPipeLandmarkExtractor
 
 app = Flask(__name__)
 
@@ -33,10 +33,9 @@ except Exception as e:
 # Configuration from config.py
 app.config['SIGNS'] = config.SIGNS
 
-# Load model at startup
+# Load binary models at startup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model_path = config.MODEL_PATH
-model, landmark_extractor = initialize_model(None, model_path, None)
+binary_models, landmark_extractor = initialize_model(None, None, None)
 
 @app.route("/", methods=["GET"])
 def health_check():
@@ -51,6 +50,10 @@ def process_endpoint():
 
     tmp_path = None
     video_file = request.files["video"]
+    
+    # Check if a specific sign is requested for binary classification
+    target_sign = request.form.get("sign")  # Optional parameter
+    
     try:
         # Secure filename and determine suffix
         filename = secure_filename(video_file.filename)
@@ -61,11 +64,24 @@ def process_endpoint():
             tmp_path = tmp.name
             video_file.save(tmp_path)
 
-        # Run processing
-        predictions = process_video(tmp_path, model, landmark_extractor)
-
-        # Return results
-        return jsonify({"status": "success", "predictions": predictions}), 200
+        # Run processing with optional target sign
+        if target_sign:
+            # Validate the sign name
+            if target_sign not in app.config['SIGNS']:
+                return jsonify({"status": "error", "error": "Invalid sign name"}), 400
+            
+            # Single sign recognition (true/false)
+            threshold = float(request.form.get("threshold", 0.5))  # Default threshold
+            result = process_single_sign(tmp_path, target_sign, binary_models, landmark_extractor, threshold)
+            return jsonify({"status": "success", "result": result}), 200
+        else:
+            # No target sign provided - return error asking for sign parameter
+            return jsonify({
+                "status": "error", 
+                "error": "No sign specified", 
+                "message": "Please provide a 'sign' parameter to specify which sign to recognize",
+                "available_signs": app.config['SIGNS']
+            }), 400
 
     except ValueError as ve:
         # Validation-related error (e.g., hands not detected)
@@ -597,10 +613,20 @@ def get_sample_landmarks(sample_id):
 
 if __name__ == "__main__":
     print("Starting Gestus API...")
-    print(f"Model path: {config.MODEL_PATH}")
+    print(f"Binary models directory: ./models")
     print(f"Supabase URL: {config.SUPABASE_URL}")
     print(f"Available signs: {len(config.SIGNS)}")
     print(f"Port: {config.PORT}")
+    
+    # Test binary models
+    try:
+        print("Testing binary models...")
+        if binary_models and len(binary_models) > 0:
+            print(f"Successfully loaded {len(binary_models)} binary models for signs: {list(binary_models.keys())}")
+        else:
+            print("Warning: No binary models loaded")
+    except Exception as e:
+        print(f"Warning: Binary models test failed: {e}")
     
     # Test Supabase connection
     try:

@@ -7,8 +7,8 @@ import os
 FLASK_ENV = os.getenv("FLASK_ENV", "production")
 PORT = int(os.getenv("PORT", 5000))
 
-# Model settings
-MODEL_PATH = os.getenv("MODEL_PATH", "best_model.pth")
+# Models settings
+MODELS_DIR = os.getenv("MODELS_DIR", "./models")  # Directory containing binary classifier models
 
 # Supabase settings (replace with your actual credentials)
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://bctfiwwbascthdbttavj.supabase.co")
