@@ -74,14 +74,6 @@ def process_endpoint():
             threshold = float(request.form.get("threshold", 0.5))  # Default threshold
             result = process_single_sign(tmp_path, target_sign, binary_models, landmark_extractor, threshold)
             return jsonify({"status": "success", "result": result}), 200
-        else:
-            # No target sign provided - return error asking for sign parameter
-            return jsonify({
-                "status": "error", 
-                "error": "No sign specified", 
-                "message": "Please provide a 'sign' parameter to specify which sign to recognize",
-                "available_signs": app.config['SIGNS']
-            }), 400
 
     except ValueError as ve:
         # Validation-related error (e.g., hands not detected)
